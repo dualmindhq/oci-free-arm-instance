@@ -5,11 +5,15 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
+permissions:
+  contents: read
+  actions: write   # needed to auto-disable this workflow once the VM is secured
+
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
   IMAGE_ID: ${{ secrets.IMAGE_ID }}
   SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-  AD_NAME: ${{ secrets.AD_NAME }}
+  AD_NAME: ${{ secrets.AD_NAME }}   # tried first, then all other ADs in the region
 
   OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
   OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
@@ -28,11 +32,27 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: Compute cache key
+        id: cache_key
+        run: echo "week=$(date +%Y-%U)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache OCI CLI
+        id: oci_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local
+          key: oci-cli-${{ runner.os }}-${{ steps.cache_key.outputs.week }}
+          restore-keys: |
+            oci-cli-${{ runner.os }}-
+
       - name: Install OCI CLI
+        if: steps.oci_cache.outputs.cache-hit != 'true'
         run: |
           set -Eeuo pipefail
           python3 -m pip install --user --upgrade oci-cli
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Add OCI CLI to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure OCI CLI
         run: |
@@ -74,7 +94,7 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create OCI VM
+      - name: Create OCI VM (tries every AD in the region)
         id: create_vm
         if: steps.check_vm.outputs.exists != 'true'
         continue-on-error: true
@@ -84,46 +104,76 @@ jobs:
           SSH_KEY_FILE="$RUNNER_TEMP/oci_ssh_key.pub"
           printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" | tr -d '\r' > "$SSH_KEY_FILE"
 
-          OCI_OUTPUT="$(
+          mapfile -t ALL_ADS < <(
             oci --config-file "$OCI_CONFIG_FILE" \
-              compute instance launch \
+              iam availability-domain list \
               --compartment-id "$COMPARTMENT_ID" \
-              --availability-domain "$AD_NAME" \
-              --shape "VM.Standard.A1.Flex" \
-              --shape-config '{"ocpus":2,"memoryInGBs":12}' \
-              --subnet-id "$SUBNET_ID" \
-              --image-id "$IMAGE_ID" \
-              --ssh-authorized-keys-file "$SSH_KEY_FILE" \
-              --assign-public-ip true \
-              --display-name "coolify-vm" \
-              --boot-volume-size-in-gbs 50 \
               --region "$OCI_CLI_REGION" \
-              2>&1 || true
-          )"
+              --query 'data[].name' --raw-output | jq -r '.[]'
+          )
 
-          echo "$OCI_OUTPUT"
+          # try the preferred AD first, then whatever else is in the region
+          ADS=()
+          [[ -n "${AD_NAME:-}" ]] && ADS+=("$AD_NAME")
+          for ad in "${ALL_ADS[@]}"; do
+            [[ "$ad" != "${AD_NAME:-}" ]] && ADS+=("$ad")
+          done
 
-          INSTANCE_ID="$(echo "$OCI_OUTPUT" | jq -r '.data.id // empty' 2>/dev/null || true)"
-          LIFECYCLE_STATE="$(echo "$OCI_OUTPUT" | jq -r '.data["lifecycle-state"] // empty' 2>/dev/null || true)"
+          LAST_REASON="No capacity available in any AD — will retry in 5 min"
 
-          if [[ "$LIFECYCLE_STATE" == "PROVISIONING" && -n "$INSTANCE_ID" ]]; then
-            echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
-            echo "launch_success=true" >> "$GITHUB_OUTPUT"
-          elif echo "$OCI_OUTPUT" | grep -qi "Out of host capacity"; then
-            echo "launch_success=false" >> "$GITHUB_OUTPUT"
-            echo "reason=No capacity available right now, will retry in 5 min" >> "$GITHUB_OUTPUT"
-            exit 0
-          else
-            echo "launch_success=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Launch failed for a reason other than capacity - check the log" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
+          for AD in "${ADS[@]}"; do
+            echo "::group::Trying $AD"
+            OCI_OUTPUT="$(
+              oci --config-file "$OCI_CONFIG_FILE" \
+                compute instance launch \
+                --compartment-id "$COMPARTMENT_ID" \
+                --availability-domain "$AD" \
+                --shape "VM.Standard.A1.Flex" \
+                --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+                --subnet-id "$SUBNET_ID" \
+                --image-id "$IMAGE_ID" \
+                --ssh-authorized-keys-file "$SSH_KEY_FILE" \
+                --assign-public-ip true \
+                --display-name "coolify-vm" \
+                --boot-volume-size-in-gbs 50 \
+                --region "$OCI_CLI_REGION" \
+                2>&1 || true
+            )"
+            echo "$OCI_OUTPUT"
+            echo "::endgroup::"
 
-      - name: Confirm VM is running
+            INSTANCE_ID="$(echo "$OCI_OUTPUT" | jq -r '.data.id // empty' 2>/dev/null || true)"
+            LIFECYCLE_STATE="$(echo "$OCI_OUTPUT" | jq -r '.data["lifecycle-state"] // empty' 2>/dev/null || true)"
+
+            if [[ "$LIFECYCLE_STATE" == "PROVISIONING" && -n "$INSTANCE_ID" ]]; then
+              echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+              echo "launch_ad=$AD" >> "$GITHUB_OUTPUT"
+              echo "launch_success=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            elif echo "$OCI_OUTPUT" | grep -qi "TooManyRequests"; then
+              LAST_REASON="Rate limited by OCI (429) — will retry in 5 min"
+              sleep 3
+              continue
+            elif echo "$OCI_OUTPUT" | grep -qi "Out of host capacity"; then
+              LAST_REASON="No capacity available in any AD — will retry in 5 min"
+              continue
+            else
+              echo "launch_success=false" >> "$GITHUB_OUTPUT"
+              echo "reason=Launch failed for a reason other than capacity — check the log" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          done
+
+          echo "launch_success=false" >> "$GITHUB_OUTPUT"
+          echo "reason=$LAST_REASON" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm VM is running & fetch public IP
+        id: confirm
         if: steps.create_vm.outputs.instance_id != ''
         run: |
           set -Eeuo pipefail
           INSTANCE_ID="${{ steps.create_vm.outputs.instance_id }}"
+          STATE="unknown"
 
           for attempt in {1..6}; do
             STATE="$(
@@ -132,30 +182,105 @@ jobs:
                 --instance-id "$INSTANCE_ID" \
                 --region "$OCI_CLI_REGION" \
                 --query 'data["lifecycle-state"]' \
-                --raw-output 2>/dev/null || true
+                --raw-output 2>/dev/null || echo "unknown"
             )"
-            echo "Attempt $attempt/6 - state: ${STATE:-unknown}"
+            echo "Attempt $attempt/6 - state: $STATE"
             [[ "$STATE" == "RUNNING" ]] && break
             sleep 10
           done
+
+          PUBLIC_IP="$(
+            oci --config-file "$OCI_CONFIG_FILE" \
+              compute instance list-vnics \
+              --instance-id "$INSTANCE_ID" \
+              --region "$OCI_CLI_REGION" \
+              --query 'data[0]."public-ip"' \
+              --raw-output 2>/dev/null || echo "pending"
+          )"
+
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "public_ip=${PUBLIC_IP:-pending}" >> "$GITHUB_OUTPUT"
+
+      - name: Disable schedule now that the VM is secured
+        if: steps.check_vm.outputs.exists == 'true' || steps.create_vm.outputs.launch_success == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh workflow disable "create-oci-vm.yml" --repo "${{ github.repository }}"
+          echo "Schedule disabled — re-enable it manually (gh workflow enable, or via the Actions tab) if you ever need to grab another VM."
+
+      - name: Prepare notification
+        id: notify
+        if: always()
+        run: |
+          set -Eeuo pipefail
+
+          EXISTS="${{ steps.check_vm.outputs.exists }}"
+          LAUNCH_SUCCESS="${{ steps.create_vm.outputs.launch_success }}"
+          REASON="${{ steps.create_vm.outputs.reason }}"
+          AD="${{ steps.create_vm.outputs.launch_ad }}"
+          INSTANCE_ID="${{ steps.check_vm.outputs.instance_id }}${{ steps.create_vm.outputs.instance_id }}"
+          PUBLIC_IP="${{ steps.confirm.outputs.public_ip }}"
+          STATE="${{ steps.confirm.outputs.state }}"
+
+          MENTION="<@1222925001913798678>"
+          PING=""
+
+          if [[ "$EXISTS" == "true" ]]; then
+            TITLE="✅ coolify-vm is up"
+            STATUS_LINE="Already running — schedule disabled, nothing more to do"
+            COLOR="0x28a745"
+            PING="$MENTION"
+          elif [[ "$LAUNCH_SUCCESS" == "true" ]]; then
+            TITLE="🎉 coolify-vm secured!"
+            STATUS_LINE="Launched in **${AD}** — schedule disabled, nothing more to do"
+            COLOR="0x28a745"
+            PING="$MENTION"
+          elif [[ "$REASON" == *"Rate limited"* ]]; then
+            TITLE="🐢 Rate limited"
+            STATUS_LINE="OCI throttled this run — trying again in ~5 min"
+            COLOR="0xf0ad4e"
+          elif [[ "$REASON" == *"capacity"* ]]; then
+            TITLE="⏳ No capacity yet"
+            STATUS_LINE="Checked every AD, all full — trying again in ~5 min"
+            COLOR="0xf0ad4e"
+          else
+            TITLE="❌ Launch failed"
+            STATUS_LINE="Something other than capacity broke — check the run log"
+            COLOR="0xdc3545"
+            PING="$MENTION"
+          fi
+
+          CHECKED_AT="$(date -u '+%H:%M UTC')"
+
+          {
+            echo "title=$TITLE"
+            echo "color=$COLOR"
+            echo "status_line=$STATUS_LINE"
+            echo "instance_id=${INSTANCE_ID:-—}"
+            echo "public_ip=${PUBLIC_IP:-—}"
+            echo "state=${STATE:-—}"
+            echo "checked_at=$CHECKED_AT"
+            echo "ping=$PING"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Send Discord Notification
         if: always()
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: >-
-            ${{
-              steps.check_vm.outputs.exists == 'true' && '✅ coolify-vm already running'
-              || steps.create_vm.outputs.launch_success == 'true' && '🎉 coolify-vm created!'
-              || steps.create_vm.outputs.reason != '' && steps.create_vm.outputs.reason || '⏳ coolify-vm not created'
-            }}
-          color: >-
-            ${{
-              (steps.check_vm.outputs.exists == 'true' || steps.create_vm.outputs.launch_success == 'true') && '0x28a745'
-              || contains(steps.create_vm.outputs.reason, 'capacity') && '0xf0ad4e'
-              || '0xdc3545'
-            }}
+          username: "OCI VM Watcher"
+          content: ${{ steps.notify.outputs.ping }}
+          title: ${{ steps.notify.outputs.title }}
+          color: ${{ steps.notify.outputs.color }}
+          nocontext: true
           description: |
-            Region: `${{ env.OCI_CLI_REGION }}` · AD: `${{ env.AD_NAME }}`
-            Instance: `${{ steps.check_vm.outputs.instance_id || steps.create_vm.outputs.instance_id || 'none' }}`
+            ${{ steps.notify.outputs.status_line }}
+
+            🖥️ **Instance** · `${{ steps.notify.outputs.instance_id }}`
+            🌐 **Public IP** · `${{ steps.notify.outputs.public_ip }}`
+            📡 **State** · `${{ steps.notify.outputs.state }}`
+            📍 **Region / AD** · `${{ env.OCI_CLI_REGION }}` / `${{ steps.create_vm.outputs.launch_ad || env.AD_NAME }}`
+            🕒 **Checked** · ${{ steps.notify.outputs.checked_at }}
