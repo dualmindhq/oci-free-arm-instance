@@ -1,157 +1,806 @@
 name: Try to Create OCI VM
-
-on:
+'on':
   schedule:
-    - cron: "*/5 * * * *"
-
-  workflow_dispatch:
-
+    - cron: '*/5 * * * *'
+  workflow_dispatch: null
 env:
-  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-  IMAGE_ID: ${{ secrets.IMAGE_ID }}
-  SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-  AD_NAME: ${{ secrets.AD_NAME }}
-
-  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
-  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
-  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
-  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
-  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
-
+  COMPARTMENT_ID: '${{ secrets.OCI_COMPARTMENT_ID }}'
+  IMAGE_ID: '${{ secrets.IMAGE_ID }}'
+  SUBNET_ID: '${{ secrets.OCI_SUBNET_ID }}'
+  AD_NAME: '${{ secrets.AD_NAME }}'
+  OCI_CLI_REGION: '${{ secrets.OCI_CLI_REGION }}'
+  OCI_CLI_USER: '${{ secrets.OCI_CLI_USER }}'
+  OCI_CLI_TENANCY: '${{ secrets.OCI_CLI_TENANCY }}'
+  OCI_CLI_FINGERPRINT: '${{ secrets.OCI_CLI_FINGERPRINT }}'
+  OCI_CLI_KEY_CONTENT: '${{ secrets.OCI_CLI_KEY_CONTENT }}'
+  OCI_CONFIG_FILE: /home/runner/.oci/config
+  OCI_KEY_FILE: /home/runner/.oci/oci_api_key.pem
+  OCI_KEY_VALIDATION_FILE: /home/runner/.oci/oci_api_key_validation.pem
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
+      - name: Runner diagnostics
+        run: |
+          set -Eeuo pipefail
 
-      # ---------------------------------------------------------
-      # Cache pip packages
-      # ---------------------------------------------------------
+          echo "=================================================="
+          echo "RUNNER DIAGNOSTICS"
+          echo "=================================================="
+
+          echo "OS:"
+          cat /etc/os-release | sed -n '1,6p'
+
+          echo
+          echo "Kernel:"
+          uname -a
+
+          echo
+          echo "Architecture:"
+          uname -m
+
+          echo
+          echo "Python:"
+          python3 --version
+
+          echo
+          echo "OpenSSL:"
+          openssl version
+
+          echo
+          echo "jq:"
+          jq --version
+
+          echo
+          echo "=================================================="
       - name: Cache pip packages
-        id: cache-pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-oci-cli-v1
-
-      # ---------------------------------------------------------
-      # Add ~/.local/bin to PATH
-      # ---------------------------------------------------------
-      - name: Add OCI CLI to PATH
+          key: '${{ runner.os }}-pip-oci-cli-v2'
+      - name: Install OCI CLI
         run: |
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          set -Eeuo pipefail
 
-      # ---------------------------------------------------------
-      # Install OCI CLI and configure authentication
-      # ---------------------------------------------------------
-      - name: Setup OCI CLI
-        run: |
+          echo "=================================================="
+          echo "INSTALLING OCI CLI"
+          echo "=================================================="
+
           python3 -m pip install --user --upgrade oci-cli
 
-          mkdir -p ~/.oci
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
+          export PATH="$HOME/.local/bin:$PATH"
 
-          cat > ~/.oci/config <<EOF
+          echo
+          echo "OCI CLI version:"
+          oci --version
+
+          echo
+          echo "Python OCI SDK:"
+          python3 -c "import oci; print(oci.__version__)"
+
+          echo
+          echo "=================================================="
+      - name: Validate OCI inputs
+        run: >
+          set -Eeuo pipefail
+
+
+          echo "=================================================="
+
+          echo "VALIDATING OCI INPUTS"
+
+          echo "=================================================="
+
+
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+
+
+          check_nonempty() {
+            local name="$1"
+            local value="$2"
+
+            if [[ -z "$value" ]]; then
+              fail "$name is EMPTY"
+            fi
+
+            echo "$name: present"
+          }
+
+
+          check_nonempty "OCI_CLI_REGION" "$OCI_CLI_REGION"
+
+          check_nonempty "OCI_CLI_USER" "$OCI_CLI_USER"
+
+          check_nonempty "OCI_CLI_TENANCY" "$OCI_CLI_TENANCY"
+
+          check_nonempty "OCI_CLI_FINGERPRINT" "$OCI_CLI_FINGERPRINT"
+
+          check_nonempty "OCI_CLI_KEY_CONTENT" "$OCI_CLI_KEY_CONTENT"
+
+
+          check_nonempty "COMPARTMENT_ID" "$COMPARTMENT_ID"
+
+          check_nonempty "IMAGE_ID" "$IMAGE_ID"
+
+          check_nonempty "SUBNET_ID" "$SUBNET_ID"
+
+          check_nonempty "AD_NAME" "$AD_NAME"
+
+
+          echo
+
+          echo "Region: configured"
+
+          echo "User: configured"
+
+          echo "Tenancy: configured"
+
+          echo "Fingerprint: configured"
+
+          echo "Private key: configured"
+
+          echo "Compartment: configured"
+
+          echo "Image: configured"
+
+          echo "Subnet: configured"
+
+          echo "Availability Domain: configured"
+
+
+          echo
+
+          echo "Expected region: ap-mumbai-1"
+
+          echo "Actual region:   $OCI_CLI_REGION"
+
+
+          if [[ "$OCI_CLI_REGION" != "ap-mumbai-1" ]]; then
+            fail "OCI_CLI_REGION must be ap-mumbai-1"
+          fi
+
+
+          echo
+
+          echo "Checking OCID formats..."
+
+
+          if [[ ! "$OCI_CLI_USER" =~ ^ocid1\.user\. ]]; then
+            fail "OCI_CLI_USER does not look like a user OCID"
+          fi
+
+
+          if [[ ! "$OCI_CLI_TENANCY" =~ ^ocid1\.tenancy\. ]]; then
+            fail "OCI_CLI_TENANCY does not look like a tenancy OCID"
+          fi
+
+
+          if [[ ! "$COMPARTMENT_ID" =~ ^ocid1\.compartment\. ]]; then
+            fail "COMPARTMENT_ID does not look like a compartment OCID"
+          fi
+
+
+          if [[ ! "$IMAGE_ID" =~ ^ocid1\.image\. ]]; then
+            fail "IMAGE_ID does not look like an image OCID"
+          fi
+
+
+          if [[ ! "$SUBNET_ID" =~ ^ocid1\.subnet\. ]]; then
+            fail "SUBNET_ID does not look like a subnet OCID"
+          fi
+
+
+          echo "User OCID format: valid"
+
+          echo "Tenancy OCID format: valid"
+
+          echo "Compartment OCID format: valid"
+
+          echo "Image OCID format: valid"
+
+          echo "Subnet OCID format: valid"
+
+
+          echo
+
+          echo "Checking fingerprint format..."
+
+
+          if [[ ! "$OCI_CLI_FINGERPRINT" =~
+          ^([0-9a-fA-F]{2}:){15}[0-9a-fA-F]{2}$ ]]; then
+            fail "OCI_CLI_FINGERPRINT format is invalid"
+          fi
+
+
+          echo "Fingerprint format: valid"
+
+
+          echo
+
+          echo "=================================================="
+      - name: Configure OCI credentials
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "CONFIGURING OCI CREDENTIALS"
+          echo "=================================================="
+
+          mkdir -p "$HOME/.oci"
+
+          # Remove possible Windows CR characters.
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" | tr -d '\r' > "$OCI_KEY_FILE"
+
+          chmod 600 "$OCI_KEY_FILE"
+
+          cat > "$OCI_CONFIG_FILE" <<EOF
           [DEFAULT]
           user=$OCI_CLI_USER
-          tenancy=$OCI_CLI_TENANCY
           fingerprint=$OCI_CLI_FINGERPRINT
-          key_file=/home/runner/.oci/oci_api_key.pem
+          tenancy=$OCI_CLI_TENANCY
           region=$OCI_CLI_REGION
+          key_file=$OCI_KEY_FILE
           EOF
 
-      # ---------------------------------------------------------
-      # Verify OCI configuration and authentication
-      # ---------------------------------------------------------
-      - name: Check OCI configuration
+          chmod 600 "$OCI_CONFIG_FILE"
+
+          echo "Config file created."
+          echo "Private key file created."
+          echo "File permissions:"
+          ls -l "$OCI_CONFIG_FILE" "$OCI_KEY_FILE"
+
+          echo
+          echo "Sanitized OCI configuration:"
+          sed \
+            -E \
+            's#(user=).*#\1[REDACTED]#;
+             s#(fingerprint=).*#\1[REDACTED]#;
+             s#(tenancy=).*#\1[REDACTED]#;
+             s#(key_file=).*#\1[REDACTED]#' \
+            "$OCI_CONFIG_FILE"
+
+          echo
+          echo "=================================================="
+      - name: Validate OCI private key
         run: |
-          echo "========================================="
-          echo "OCI CONFIGURATION"
-          echo "========================================="
+          set -Eeuo pipefail
 
-          echo "Region: $OCI_CLI_REGION"
-          echo "AD: $AD_NAME"
-          echo "Image ID configured: $([[ -n "$IMAGE_ID" ]] && echo yes || echo no)"
-          echo "Subnet configured: $([[ -n "$SUBNET_ID" ]] && echo yes || echo no)"
-          echo "Compartment configured: $([[ -n "$COMPARTMENT_ID" ]] && echo yes || echo no)"
-          echo "User configured: $([[ -n "$OCI_CLI_USER" ]] && echo yes || echo no)"
-          echo "Tenancy configured: $([[ -n "$OCI_CLI_TENANCY" ]] && echo yes || echo no)"
-          echo "Fingerprint configured: $([[ -n "$OCI_CLI_FINGERPRINT" ]] && echo yes || echo no)"
-          echo "Private key configured: $([[ -n "$OCI_CLI_KEY_CONTENT" ]] && echo yes || echo no)"
+          echo "=================================================="
+          echo "PRIVATE KEY VALIDATION"
+          echo "=================================================="
+
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+
+          if [[ ! -s "$OCI_KEY_FILE" ]]; then
+            fail "Private key file is empty"
+          fi
+
+          echo "Private key file exists."
+
+          FIRST_LINE="$(head -n 1 "$OCI_KEY_FILE")"
+          LAST_LINE="$(tail -n 1 "$OCI_KEY_FILE")"
 
           echo
-          echo "Testing OCI authentication..."
-
-          oci iam region list
+          echo "First line:"
+          echo "$FIRST_LINE"
 
           echo
-          echo "Testing availability domains..."
+          echo "Last line:"
+          echo "$LAST_LINE"
 
-          oci iam availability-domain list \
+          if [[ "$FIRST_LINE" != "-----BEGIN PRIVATE KEY-----" ]]; then
+            fail "Private key does not start with -----BEGIN PRIVATE KEY-----"
+          fi
+
+          if [[ "$LAST_LINE" != "OCI_API_KEY" &&
+                "$LAST_LINE" != "-----END PRIVATE KEY-----" ]]; then
+            fail "Private key has unexpected trailing content"
+          fi
+
+          echo
+          if [[ "$LAST_LINE" == "OCI_API_KEY" ]]; then
+            echo "OCI_API_KEY label detected: yes"
+            echo "Removing label temporarily for OpenSSL validation."
+
+            sed '$d' "$OCI_KEY_FILE" > "$OCI_KEY_VALIDATION_FILE"
+          else
+            echo "OCI_API_KEY label detected: no"
+            cp "$OCI_KEY_FILE" "$OCI_KEY_VALIDATION_FILE"
+          fi
+
+          chmod 600 "$OCI_KEY_VALIDATION_FILE"
+
+          SECOND_LAST_LINE="$(tail -n 1 "$OCI_KEY_VALIDATION_FILE")"
+
+          if [[ "$SECOND_LAST_LINE" != "-----END PRIVATE KEY-----" ]]; then
+            fail "PEM footer is missing or malformed"
+          fi
+
+          echo "PEM header: valid"
+          echo "PEM footer: valid"
+
+          echo
+          echo "Running OpenSSL private-key integrity check..."
+
+          openssl pkey \
+            -in "$OCI_KEY_VALIDATION_FILE" \
+            -check \
+            -noout
+
+          echo
+          echo "Private key integrity: VALID"
+          echo
+          echo "=================================================="
+      - name: Verify API key fingerprint
+        run: >
+          set -Eeuo pipefail
+
+
+          echo "=================================================="
+
+          echo "API KEY FINGERPRINT VERIFICATION"
+
+          echo "=================================================="
+
+
+          DER_FILE="$RUNNER_TEMP/oci_public_key.der"
+
+
+          openssl pkey \
+            -in "$OCI_KEY_VALIDATION_FILE" \
+            -pubout \
+            -outform DER \
+            -out "$DER_FILE"
+
+          DERIVED_FINGERPRINT="$(
+            openssl md5 -c < "$DER_FILE" |
+            awk '{print $2}' |
+            tr '[:upper:]' '[:lower:]'
+          )"
+
+
+          OCI_FINGERPRINT_NORMALIZED="$(echo "$OCI_CLI_FINGERPRINT" | tr
+          '[:upper:]' '[:lower:]')"
+
+
+          echo "Fingerprint derived from private key:"
+
+          echo "$DERIVED_FINGERPRINT"
+
+
+          echo
+
+          echo "Fingerprint configured in GitHub:"
+
+          echo "$OCI_FINGERPRINT_NORMALIZED"
+
+
+          echo
+
+          if [[ "$DERIVED_FINGERPRINT" != "$OCI_FINGERPRINT_NORMALIZED" ]]; then
+            echo "::error::FINGERPRINT MISMATCH"
+            echo "::error::The private key in OCI_CLI_KEY_CONTENT does NOT match OCI_CLI_FINGERPRINT."
+            exit 1
+          fi
+
+
+          echo "Fingerprint match: VALID"
+
+          echo
+
+          echo "=================================================="
+      - name: Test OCI CLI configuration
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "OCI CLI CONFIGURATION TEST"
+          echo "=================================================="
+
+          oci --config-file "$OCI_CONFIG_FILE" \
+            setup repair-file-permissions \
+            --file "$OCI_CONFIG_FILE" \
+            2>/dev/null || true
+
+          echo
+          echo "OCI config file:"
+          ls -lh "$OCI_CONFIG_FILE"
+
+          echo
+          echo "OCI private key:"
+          ls -lh "$OCI_KEY_FILE"
+
+          echo
+          echo "=================================================="
+      - name: Test OCI authentication
+        id: auth_test
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "OCI AUTHENTICATION TEST"
+          echo "=================================================="
+
+          AUTH_LOG="$RUNNER_TEMP/oci_auth.log"
+
+          echo "Running:"
+          echo "oci iam region list"
+          echo
+
+          if oci --config-file "$OCI_CONFIG_FILE" iam region list \
+              > "$AUTH_LOG" 2>&1; then
+
+            echo "OCI AUTHENTICATION: SUCCESS"
+
+            echo
+            echo "Regions returned:"
+            jq -r '.data[] | .name' "$AUTH_LOG"
+
+          else
+
+            echo "::error::OCI AUTHENTICATION FAILED"
+
+            echo
+            echo "Sanitized OCI authentication diagnostics:"
+
+            grep -E \
+              '"code"|"message"|"status"|"operation_name"|"request_endpoint"' \
+              "$AUTH_LOG" \
+              || true
+
+            echo
+            echo "Private-key fingerprint validation already passed before this step."
+
+            echo
+            echo "Most likely remaining causes:"
+            echo "1. API key was deleted/replaced in OCI."
+            echo "2. OCI_CLI_USER does not own the API key."
+            echo "3. OCI_CLI_TENANCY does not match the user tenancy."
+            echo "4. OCI authentication clock/signature issue."
+            echo "5. OCI API key is not active."
+
+            exit 1
+          fi
+
+          echo
+          echo "=================================================="
+      - name: Verify OCI user identity
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "VERIFYING OCI USER"
+          echo "=================================================="
+
+          oci --config-file "$OCI_CONFIG_FILE" \
+            iam user get \
+            --user-id "$OCI_CLI_USER" \
+            --query 'data | {id: id, name: name, email: email, state: "lifecycle-state"}' \
+            --output json
+
+          echo
+          echo "=================================================="
+      - name: Validate availability domain
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "AVAILABILITY DOMAIN VALIDATION"
+          echo "=================================================="
+
+          echo "Requested AD:"
+          echo "$AD_NAME"
+
+          AD_OUTPUT="$(
+            oci --config-file "$OCI_CONFIG_FILE" \
+              iam availability-domain list \
+              --compartment-id "$COMPARTMENT_ID" \
+              --region "$OCI_CLI_REGION"
+          )"
+
+          echo
+          echo "Available ADs:"
+          echo "$AD_OUTPUT" | jq -r '.data[].name'
+
+          if ! echo "$AD_OUTPUT" | jq -e \
+              --arg AD "$AD_NAME" \
+              '.data[] | select(.name == $AD)' >/dev/null; then
+
+            echo "::error::AD_NAME does not exist in this region."
+            exit 1
+          fi
+
+          echo
+          echo "Availability domain: VALID"
+          echo
+          echo "=================================================="
+      - name: Validate compartment
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "COMPARTMENT VALIDATION"
+          echo "=================================================="
+
+          oci --config-file "$OCI_CONFIG_FILE" \
+            iam compartment get \
             --compartment-id "$COMPARTMENT_ID" \
-            --region "$OCI_CLI_REGION"
+            --query 'data | {id: id, name: name, state: "lifecycle-state"}' \
+            --output json
 
-      # ---------------------------------------------------------
-      # Check if VM already exists
-      # ---------------------------------------------------------
+          echo
+          echo "Compartment: VALID"
+          echo
+          echo "=================================================="
+
+          - name: Get Mumbai availability domain
+            run: |
+              set -Eeuo pipefail
+          
+              oci --config-file "$OCI_CONFIG_FILE" \
+                iam availability-domain list \
+                --compartment-id "$COMPARTMENT_ID" \
+                --region "ap-mumbai-1" \
+                --output json
+      # =========================================================
+      # STEP 13 - Validate subnet
+      # =========================================================
+      - name: Validate subnet
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "SUBNET VALIDATION"
+          echo "=================================================="
+
+          SUBNET_OUTPUT="$(
+            oci --config-file "$OCI_CONFIG_FILE" \
+              network subnet get \
+              --subnet-id "$SUBNET_ID"
+          )"
+
+          echo "$SUBNET_OUTPUT" |
+            jq '.data | {
+              id: .id,
+              display_name: .["display-name"],
+              lifecycle_state: .["lifecycle-state"],
+              cidr_block: .["cidr-block"],
+              prohibit_public_ip_on_vnic: .["prohibit-public-ip-on-vnic"],
+              virtual_network_id: .["vcn-id"]
+            }'
+
+          SUBNET_REGION="$(
+            echo "$SUBNET_OUTPUT" |
+            jq -r '.data."availability-domain" // empty'
+          )"
+
+          SUBNET_STATE="$(
+            echo "$SUBNET_OUTPUT" |
+            jq -r '.data."lifecycle-state" // empty'
+          )"
+
+          if [[ "$SUBNET_STATE" != "AVAILABLE" ]]; then
+            echo "::error::Subnet is not AVAILABLE. State: $SUBNET_STATE"
+            exit 1
+          fi
+
+          PROHIBIT_PUBLIC_IP="$(
+            echo "$SUBNET_OUTPUT" |
+            jq -r '.data."prohibit-public-ip-on-vnic"'
+          )"
+
+          echo
+          echo "Subnet state: VALID"
+          echo "Public IP prohibited: $PROHIBIT_PUBLIC_IP"
+
+          if [[ "$PROHIBIT_PUBLIC_IP" == "true" ]]; then
+            echo "::warning::This subnet prohibits public IPs."
+            echo "::warning::The launch request asks for --assign-public-ip true."
+          fi
+
+          echo
+          echo "=================================================="
+
+
+      # =========================================================
+      # STEP 14 - Validate image
+      # =========================================================
+      - name: Validate image
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "IMAGE VALIDATION"
+          echo "=================================================="
+
+          IMAGE_OUTPUT="$(
+            oci --config-file "$OCI_CONFIG_FILE" \
+              compute image get \
+              --image-id "$IMAGE_ID"
+          )"
+
+          echo "$IMAGE_OUTPUT" |
+            jq '.data | {
+              id: .id,
+              display_name: .["display-name"],
+              operating_system: .["operating-system"],
+              operating_system_version: .["operating-system-version"],
+              lifecycle_state: .["lifecycle-state"],
+              base_image_id: .["base-image-id"]
+            }'
+
+          IMAGE_STATE="$(
+            echo "$IMAGE_OUTPUT" |
+            jq -r '.data."lifecycle-state" // empty'
+          )"
+
+          if [[ "$IMAGE_STATE" != "AVAILABLE" ]]; then
+            echo "::error::Image is not AVAILABLE. State: $IMAGE_STATE"
+            exit 1
+          fi
+
+          echo
+          echo "Image state: VALID"
+          echo
+          echo "=================================================="
+
+
+      # =========================================================
+      # STEP 15 - Check existing VM
+      # =========================================================
       - name: Check for existing VM
         id: check_vm
         run: |
-          echo "Checking whether coolify-vm already exists..."
+          set -Eeuo pipefail
 
-          EXISTING_VM=$(oci compute instance list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --display-name "coolify-vm" \
-            --region "$OCI_CLI_REGION" \
-            --all \
-            --query 'data[0].id' \
-            --raw-output 2>/dev/null || true)
+          echo "=================================================="
+          echo "EXISTING VM CHECK"
+          echo "=================================================="
 
-          if [ -n "$EXISTING_VM" ] && [ "$EXISTING_VM" != "null" ]; then
+          EXISTING_VM="$(
+            oci --config-file "$OCI_CONFIG_FILE" \
+              compute instance list \
+              --compartment-id "$COMPARTMENT_ID" \
+              --display-name "coolify-vm" \
+              --region "$OCI_CLI_REGION" \
+              --all \
+              --query 'data[0].id' \
+              --raw-output
+          )"
+
+          if [[ -n "$EXISTING_VM" && "$EXISTING_VM" != "null" ]]; then
             echo "VM already exists."
-            echo "Instance OCID: $EXISTING_VM"
+            echo "Instance found: yes"
+
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "instance_id=$EXISTING_VM" >> "$GITHUB_OUTPUT"
+
           else
             echo "No existing coolify-vm found."
+
             echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "instance_id=" >> "$GITHUB_OUTPUT"
           fi
 
-      # ---------------------------------------------------------
-      # Create VM
-      # ---------------------------------------------------------
+          echo
+          echo "=================================================="
+
+
+      # =========================================================
+      # STEP 16 - Prepare SSH public key
+      # =========================================================
+      - name: Validate SSH public key
+        if: steps.check_vm.outputs.exists != 'true'
+        run: |
+          set -Eeuo pipefail
+
+          echo "=================================================="
+          echo "SSH PUBLIC KEY VALIDATION"
+          echo "=================================================="
+
+          SSH_KEY_FILE="$RUNNER_TEMP/oci_ssh_key.pub"
+
+          printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" |
+            tr -d '\r' > "$SSH_KEY_FILE"
+
+          chmod 600 "$SSH_KEY_FILE"
+
+          if [[ ! -s "$SSH_KEY_FILE" ]]; then
+            echo "::error::SSH_PUBLIC_KEY is empty."
+            exit 1
+          fi
+
+          echo "SSH key present."
+
+          if ! grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) ' "$SSH_KEY_FILE"; then
+            echo "::error::SSH_PUBLIC_KEY doesn't look like a valid SSH public key."
+            exit 1
+          fi
+
+          echo "SSH public key format: VALID"
+          echo
+          echo "=================================================="
+
+
+      # =========================================================
+      # STEP 17 - Launch VM
+      # =========================================================
       - name: Create OCI VM
         id: create_vm
         if: steps.check_vm.outputs.exists != 'true'
         continue-on-error: true
         run: |
-          echo "========================================="
-          echo "LAUNCHING OCI VM"
-          echo "========================================="
+          set -Eeuo pipefail
 
-          printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+          echo "=================================================="
+          echo "OCI VM LAUNCH"
+          echo "=================================================="
 
-          OCI_OUTPUT=$(oci compute instance launch \
-            --compartment-id "$COMPARTMENT_ID" \
-            --availability-domain "$AD_NAME" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
-            --subnet-id "$SUBNET_ID" \
-            --image-id "$IMAGE_ID" \
-            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
-            --assign-public-ip true \
-            --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 50 \
-            --region "$OCI_CLI_REGION" \
-            2>&1 || true)
+          SSH_KEY_FILE="$RUNNER_TEMP/oci_ssh_key.pub"
 
-          echo "========================================="
-          echo "OCI RESPONSE"
-          echo "========================================="
+          echo "Region:"
+          echo "$OCI_CLI_REGION"
+
+          echo
+          echo "Availability Domain:"
+          echo "$AD_NAME"
+
+          echo
+          echo "Shape:"
+          echo "VM.Standard.A1.Flex"
+
+          echo
+          echo "OCPU:"
+          echo "2"
+
+          echo
+          echo "Memory:"
+          echo "12 GB"
+
+          echo
+          echo "Boot volume:"
+          echo "50 GB"
+
+          echo
+          echo "Display name:"
+          echo "coolify-vm"
+
+          echo
+          echo "Launching..."
+
+          OCI_OUTPUT="$(
+            oci --config-file "$OCI_CONFIG_FILE" \
+              compute instance launch \
+              --compartment-id "$COMPARTMENT_ID" \
+              --availability-domain "$AD_NAME" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+              --subnet-id "$SUBNET_ID" \
+              --image-id "$IMAGE_ID" \
+              --ssh-authorized-keys-file "$SSH_KEY_FILE" \
+              --assign-public-ip true \
+              --display-name "coolify-vm" \
+              --boot-volume-size-in-gbs 50 \
+              --region "$OCI_CLI_REGION" \
+              2>&1 || true
+          )"
+
+          echo
+          echo "=================================================="
+          echo "OCI LAUNCH RESPONSE"
+          echo "=================================================="
+
           echo "$OCI_OUTPUT"
-          echo "========================================="
+
+          echo "=================================================="
 
           {
             echo "log_data<<EOF"
@@ -159,44 +808,168 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            INSTANCE_ID=$(echo "$OCI_OUTPUT" | jq -r '.data.id // empty')
+          INSTANCE_ID="$(
+            echo "$OCI_OUTPUT" |
+            jq -r '.data.id // empty' 2>/dev/null || true
+          )"
 
-            echo "VM launch request accepted."
-            echo "Instance OCID: $INSTANCE_ID"
+          LIFECYCLE_STATE="$(
+            echo "$OCI_OUTPUT" |
+            jq -r '.data."lifecycle-state" // empty' 2>/dev/null || true
+          )"
 
+          REQUEST_ID="$(
+            echo "$OCI_OUTPUT" |
+            jq -r '.headers["opc-request-id"] // empty' 2>/dev/null || true
+          )"
+
+          echo
+          echo "Parsed response:"
+          echo "Instance ID returned: $([[ -n "$INSTANCE_ID" ]] && echo yes || echo no)"
+          echo "Lifecycle state: ${LIFECYCLE_STATE:-not returned}"
+
+          if [[ -n "$INSTANCE_ID" ]]; then
             echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
-            echo "launch_success=true" >> "$GITHUB_OUTPUT"
-
-            exit 0
+          else
+            echo "instance_id=" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "VM launch did not return PROVISIONING."
-          echo "launch_success=false" >> "$GITHUB_OUTPUT"
+          if [[ -n "$REQUEST_ID" ]]; then
+            echo "OCI Request ID: $REQUEST_ID"
+          fi
 
-          exit 1
+          if [[ "$LIFECYCLE_STATE" == "PROVISIONING" ]]; then
+            echo
+            echo "VM launch request accepted."
+            echo "launch_success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo
+            echo "::error::VM launch did not return PROVISIONING."
+            echo "launch_success=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
-      # ---------------------------------------------------------
-      # Handle already-existing VM
-      # ---------------------------------------------------------
+
+      # =========================================================
+      # STEP 18 - Existing VM result
+      # =========================================================
       - name: Existing VM result
         if: steps.check_vm.outputs.exists == 'true'
         run: |
-          echo "========================================="
+          set -Eeuo pipefail
+
+          echo "=================================================="
           echo "VM ALREADY EXISTS"
-          echo "========================================="
-          echo "Instance OCID: ${{ steps.check_vm.outputs.instance_id }}"
+          echo "=================================================="
+
+          echo "Instance already exists."
           echo "No new VM was created."
 
-      # ---------------------------------------------------------
-      # Send Discord notification
-      # ---------------------------------------------------------
+          echo
+          echo "Instance lifecycle information:"
+
+          oci --config-file "$OCI_CONFIG_FILE" \
+            compute instance get \
+            --instance-id "${{ steps.check_vm.outputs.instance_id }}" \
+            --query 'data | {
+              id: id,
+              display_name: "display-name",
+              lifecycle_state: "lifecycle-state",
+              shape: shape,
+              region: "region"
+            }' \
+            --output json
+
+          echo
+          echo "=================================================="
+
+
+      # =========================================================
+      # STEP 19 - Verify newly created VM
+      # =========================================================
+      - name: Verify created VM
+        if: steps.create_vm.outputs.instance_id != ''
+        run: |
+          set -Eeuo pipefail
+
+          INSTANCE_ID="${{ steps.create_vm.outputs.instance_id }}"
+
+          echo "=================================================="
+          echo "VERIFYING CREATED VM"
+          echo "=================================================="
+
+          echo "Instance OCID received."
+
+          for attempt in {1..6}; do
+            echo
+            echo "Verification attempt $attempt/6..."
+
+            INSTANCE_OUTPUT="$(
+              oci --config-file "$OCI_CONFIG_FILE" \
+                compute instance get \
+                --instance-id "$INSTANCE_ID" \
+                --region "$OCI_CLI_REGION" \
+                2>/dev/null || true
+            )"
+
+            STATE="$(
+              echo "$INSTANCE_OUTPUT" |
+              jq -r '.data."lifecycle-state" // empty' 2>/dev/null || true
+            )"
+
+            PUBLIC_IP="$(
+              echo "$INSTANCE_OUTPUT" |
+              jq -r '.data."public-ip" // empty' 2>/dev/null || true
+            )"
+
+            echo "Lifecycle state: ${STATE:-unknown}"
+
+            if [[ -n "$PUBLIC_IP" ]]; then
+              echo "Public IP returned: yes"
+            else
+              echo "Public IP returned: no"
+            fi
+
+            if [[ "$STATE" == "RUNNING" ]]; then
+              echo
+              echo "VM is RUNNING."
+              break
+            fi
+
+            sleep 10
+          done
+
+          echo
+          echo "Final VM information:"
+
+          oci --config-file "$OCI_CONFIG_FILE" \
+            compute instance get \
+            --instance-id "$INSTANCE_ID" \
+            --region "$OCI_CLI_REGION" \
+            --query 'data | {
+              id: id,
+              display_name: "display-name",
+              lifecycle_state: "lifecycle-state",
+              shape: shape,
+              region: "region",
+              fault_domain: "fault-domain",
+              availability_domain: "availability-domain"
+            }' \
+            --output json
+
+          echo
+          echo "=================================================="
+
+
+      # =========================================================
+      # STEP 20 - Send Discord notification
+      # =========================================================
       - name: Send Discord Notification
         if: always()
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ job.status }}"
+          title: "OCI VM Workflow: ${{ job.status }}"
           status: ${{ job.status }}
           color: ${{ job.status == 'success' && '0x28a745' || '0xdc3545' }}
           description: |
@@ -217,7 +990,10 @@ jobs:
             Created Instance:
             `${{ steps.create_vm.outputs.instance_id }}`
 
-            **Launch Log:**
+            Launch Success:
+            `${{ steps.create_vm.outputs.launch_success }}`
+
+            **Launch Log**
             ```text
             ${{ steps.create_vm.outputs.log_data }}
             ```
