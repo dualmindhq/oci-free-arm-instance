@@ -180,8 +180,8 @@ jobs:
           fi
 
 
-          if [[ ! "$COMPARTMENT_ID" =~ ^ocid1\.compartment\. ]]; then
-            fail "COMPARTMENT_ID does not look like a compartment OCID"
+          if [[ ! "$COMPARTMENT_ID" =~ ^ocid1\.(compartment|tenancy)\. ]]; then
+            fail "COMPARTMENT_ID must be a tenancy OCID or compartment OCID"
           fi
 
 
