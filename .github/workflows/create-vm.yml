@@ -1,4 +1,3 @@
-````yaml
 name: Try to Create OCI VM
 
 on:
@@ -222,4 +221,3 @@ jobs:
             ```text
             ${{ steps.create_vm.outputs.log_data }}
             ```
-````
