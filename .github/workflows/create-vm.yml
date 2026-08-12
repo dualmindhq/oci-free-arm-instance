@@ -1,16 +1,19 @@
+````yaml
 name: Try to Create OCI VM
-# It will run every 5 minutes.
+
 on:
   schedule:
     - cron: "*/5 * * * *"
-  # Allows you to manually run this workflow from the Actions tab
+
   workflow_dispatch:
+
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-  IMAGE_ID: "ocid1.image.oc1.ap-singapore-1.aaaaaaaa5a3xwkk5vaichk47fms2uzvsqeriats2uorf6kwgq3l3nwrbhipa"
+  IMAGE_ID: ${{ secrets.IMAGE_ID }}
   SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-  AD_NAME: "KClJ:AP-SINGAPORE-1-AD-1"
-  OCI_CLI_REGION: "ap-singapore-1"
+  AD_NAME: ${{ secrets.AD_NAME }}
+
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
   OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
@@ -19,78 +22,204 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
+
+      # ---------------------------------------------------------
+      # Cache pip packages
+      # ---------------------------------------------------------
       - name: Cache pip packages
         id: cache-pip
         uses: actions/cache@v4
         with:
-          path: ~/.local
+          path: ~/.cache/pip
           key: ${{ runner.os }}-pip-oci-cli-v1
 
-      - name: Add OCI CLI to path
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Setup OCI CLI and Try to Create VM
-        id: create_vm
-        # This forces the job to succeed so the cache will save.
-        continue-on-error: true 
+      # ---------------------------------------------------------
+      # Add ~/.local/bin to PATH
+      # ---------------------------------------------------------
+      - name: Add OCI CLI to PATH
         run: |
-          set -o pipefail
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-          pip install oci-cli
+      # ---------------------------------------------------------
+      # Install OCI CLI and configure authentication
+      # ---------------------------------------------------------
+      - name: Setup OCI CLI
+        run: |
+          python3 -m pip install --user --upgrade oci-cli
 
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
-          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
-          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
-          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
-          echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_CLI_USER
+          tenancy=$OCI_CLI_TENANCY
+          fingerprint=$OCI_CLI_FINGERPRINT
+          key_file=/home/runner/.oci/oci_api_key.pem
+          region=$OCI_CLI_REGION
+          EOF
 
-          # Run the command, capture ALL output, and use '|| true' to prevent the script from exiting early.
+      # ---------------------------------------------------------
+      # Verify OCI configuration and authentication
+      # ---------------------------------------------------------
+      - name: Check OCI configuration
+        run: |
+          echo "========================================="
+          echo "OCI CONFIGURATION"
+          echo "========================================="
+
+          echo "Region: $OCI_CLI_REGION"
+          echo "AD: $AD_NAME"
+          echo "Image ID configured: $([[ -n "$IMAGE_ID" ]] && echo yes || echo no)"
+          echo "Subnet configured: $([[ -n "$SUBNET_ID" ]] && echo yes || echo no)"
+          echo "Compartment configured: $([[ -n "$COMPARTMENT_ID" ]] && echo yes || echo no)"
+          echo "User configured: $([[ -n "$OCI_CLI_USER" ]] && echo yes || echo no)"
+          echo "Tenancy configured: $([[ -n "$OCI_CLI_TENANCY" ]] && echo yes || echo no)"
+          echo "Fingerprint configured: $([[ -n "$OCI_CLI_FINGERPRINT" ]] && echo yes || echo no)"
+          echo "Private key configured: $([[ -n "$OCI_CLI_KEY_CONTENT" ]] && echo yes || echo no)"
+
+          echo
+          echo "Testing OCI authentication..."
+
+          oci iam region list
+
+          echo
+          echo "Testing availability domains..."
+
+          oci iam availability-domain list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --region "$OCI_CLI_REGION"
+
+      # ---------------------------------------------------------
+      # Check if VM already exists
+      # ---------------------------------------------------------
+      - name: Check for existing VM
+        id: check_vm
+        run: |
+          echo "Checking whether coolify-vm already exists..."
+
+          EXISTING_VM=$(oci compute instance list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --display-name "coolify-vm" \
+            --region "$OCI_CLI_REGION" \
+            --all \
+            --query 'data[0].id' \
+            --raw-output 2>/dev/null || true)
+
+          if [ -n "$EXISTING_VM" ] && [ "$EXISTING_VM" != "null" ]; then
+            echo "VM already exists."
+            echo "Instance OCID: $EXISTING_VM"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "instance_id=$EXISTING_VM" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing coolify-vm found."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---------------------------------------------------------
+      # Create VM
+      # ---------------------------------------------------------
+      - name: Create OCI VM
+        id: create_vm
+        if: steps.check_vm.outputs.exists != 'true'
+        continue-on-error: true
+        run: |
+          echo "========================================="
+          echo "LAUNCHING OCI VM"
+          echo "========================================="
+
+          printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
             --subnet-id "$SUBNET_ID" \
             --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
             --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 200 2>&1 || true)
+            --boot-volume-size-in-gbs 50 \
+            --region "$OCI_CLI_REGION" \
+            2>&1 || true)
 
-          # Store the log as a GitHub step output
-          echo "log_data<<EOF" >> $GITHUB_OUTPUT
-          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "========================================="
+          echo "OCI RESPONSE"
+          echo "========================================="
+          echo "$OCI_OUTPUT"
+          echo "========================================="
 
-          # Check the log content for an error string.
+          {
+            echo "log_data<<EOF"
+            echo "$OCI_OUTPUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
           if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "Success! 'PROVISIONING' state found in output."
+            INSTANCE_ID=$(echo "$OCI_OUTPUT" | jq -r '.data.id // empty')
+
+            echo "VM launch request accepted."
+            echo "Instance OCID: $INSTANCE_ID"
+
+            echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+            echo "launch_success=true" >> "$GITHUB_OUTPUT"
+
             exit 0
-          else
-            echo "Error: Success string not found in OCI output. Failing the step."
-            exit 1
           fi
 
+          echo "VM launch did not return PROVISIONING."
+          echo "launch_success=false" >> "$GITHUB_OUTPUT"
+
+          exit 1
+
+      # ---------------------------------------------------------
+      # Handle already-existing VM
+      # ---------------------------------------------------------
+      - name: Existing VM result
+        if: steps.check_vm.outputs.exists == 'true'
+        run: |
+          echo "========================================="
+          echo "VM ALREADY EXISTS"
+          echo "========================================="
+          echo "Instance OCID: ${{ steps.check_vm.outputs.instance_id }}"
+          echo "No new VM was created."
+
+      # ---------------------------------------------------------
+      # Send Discord notification
+      # ---------------------------------------------------------
       - name: Send Discord Notification
         if: always()
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
+          title: "OCI VM Status: ${{ job.status }}"
+          status: ${{ job.status }}
+          color: ${{ job.status == 'success' && '0x28a745' || '0xdc3545' }}
           description: |
-            Attempt to create A1.Flex VM.
-            **Status:** `${{ steps.create_vm.outcome }}`
+            **OCI VM Workflow**
 
-            **Log Output:**
-            ```json
+            Region:
+            `${{ env.OCI_CLI_REGION }}`
+
+            Availability Domain:
+            `${{ env.AD_NAME }}`
+
+            VM:
+            `coolify-vm`
+
+            Existing VM:
+            `${{ steps.check_vm.outputs.exists }}`
+
+            Created Instance:
+            `${{ steps.create_vm.outputs.instance_id }}`
+
+            **Launch Log:**
+            ```text
             ${{ steps.create_vm.outputs.log_data }}
             ```
+````
